@@ -85,30 +85,32 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    U["User prompt + data<br/>(input)"] --> PL["Plan steps / pick workflow template<br/>(LLM · runtime)"]
-    PL --> GEN["Generate Python / R code<br/>(LLM · runtime)"]
+    U["User prompt + data<br/>(input)"] --> PL["Understand request, plan first step<br/>(LLM · runtime)"]
+    PL --> DEC{"Choose next action<br/>(LLM · runtime)"}
+    DEC -->|"Fetch data / call API"| GEN["Generate Python / R code for the action<br/>(LLM · runtime)"]
+    DEC -->|"Train model (PyTorch / TF)"| GEN
+    DEC -->|"EDA: stats / charts"| GEN
     GEN --> EX["Execute in per-user sandbox<br/>(no-LLM · runtime)"]
-    EX --> BR{"Needs more?<br/>(LLM · runtime)"}
-    BR -->|External data| FD["Fetch data / call external APIs<br/>(no-LLM · runtime)"]
-    BR -->|Modeling| ML["Train ML: PyTorch / TensorFlow<br/>(no-LLM · runtime)"]
-    BR -->|EDA| ED["Stats, charts, full EDA report<br/>(mixed · runtime)"]
-    FD --> INT["Interpret results<br/>(LLM · runtime)"]
-    ML --> INT
-    ED --> INT
+    EX --> CHK{"Evaluate result<br/>(mixed · runtime)"}
+    CHK -->|"Error — fix code (inner repair loop)"| GEN
+    CHK -->|"Need more — next action (agentic loop)"| DEC
+    CHK -->|"Done"| INT["Interpret results<br/>(LLM · runtime)"]
     INT --> VIZ["Visualize + narrate<br/>(mixed · runtime)"]
     VIZ --> SAVE{"Reuse?<br/>(no-LLM · runtime, user)"}
     SAVE -->|"Notebook / scheduled run"| PERSIST["Persist as reusable workflow<br/>(no-LLM · runtime)"]
-    SAVE -->|One-off| OUT["Answer to user<br/>(output)"]
+    SAVE -->|"One-off"| OUT["Answer to user<br/>(output)"]
     PERSIST --> OUT
     classDef llm fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
     classDef det fill:#e2e8f0,stroke:#64748b,color:#1e293b;
     classDef mixed fill:#ede9fe,stroke:#8b5cf6,color:#4c1d95;
     classDef io fill:#ffffff,stroke:#94a3b8,color:#334155;
     class U,OUT io;
-    class PL,GEN,BR,INT llm;
-    class EX,FD,ML,SAVE,PERSIST det;
-    class ED,VIZ mixed;
+    class PL,DEC,GEN,INT llm;
+    class EX,SAVE,PERSIST det;
+    class CHK,VIZ mixed;
 ```
+
+*Two nested loops are collapsed into the cycle above: an **inner repair loop** (a runtime error sends the code back to "Generate" to be fixed and re-run) and an **outer agentic loop** ("need more" returns to "Choose next action" for the next step). The cycle runs many times — often several steps — before "Done"; it is not a single pass, and the three action types are choices made per pass, not one-time exits. Julius doesn't publish its exact control flow, so the loop structure is inferred from its documented auto-debug behavior and reviewer observations of multi-step runs.*
 
 **Decomposition (Q1).** User- or agent-defined step plans / notebook cells. More a *guided plan executor* than an autonomous decomposer — you (or a Custom Agent's instructions) provide the steps.
 
@@ -192,31 +194,35 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    U["English question<br/>(input)"] --> LEAD["Leader: reason about intent<br/>(LLM · runtime)"]
-    LEAD --> RET["Retrieve context via PgVector hybrid search<br/>(mixed · fixed)"]
-    RET --> CTX["6 layers of context assembled<br/>(no-LLM · fixed)"]
-    CTX --> DEL{"Delegate<br/>(LLM · runtime)"}
-    DEL -->|Read query| AN["Analyst: writes read-only SQL<br/>(LLM · runtime)"]
-    DEL -->|Build asset| EN["Engineer: writes views in dash schema<br/>(LLM · runtime)"]
+    U["English question / request<br/>(input)"] --> LEAD["Leader: route + synthesize (no SQL tools)<br/>(LLM · runtime)"]
+    LEAD -->|"data question (default)"| RET["Retrieve knowledge + learnings via PgVector hybrid search<br/>(mixed · fixed)"]
+    LEAD -->|"explicit: create a view / table"| EN["Engineer: build view in dash schema + record to knowledge<br/>(LLM · runtime)"]
+    RET --> CTX["Context assembled (incl. existing dash views)<br/>(no-LLM · fixed)"]
+    CTX --> AN["Analyst: prefer dash views, write read-only SQL<br/>(LLM · runtime)"]
     AN --> RUN["Execute SQL<br/>(no-LLM · runtime)"]
-    EN --> RUN
     RUN --> OK{"Success?<br/>(no-LLM · runtime)"}
-    OK -->|Yes| KN["Save validated query as Knowledge<br/>(no-LLM · runtime)"]
-    OK -->|No| LM["Learning Machine: diagnose, fix, save Learning<br/>(LLM · runtime)"]
+    OK -->|"No — error"| LM["Analyst: introspect, fix, save Learning<br/>(LLM · runtime)"]
     LM --> RUN
-    KN --> INT["Interpret results into business answer<br/>(LLM · runtime)"]
+    OK -->|Yes| KN["Save validated query as Knowledge (if reusable)<br/>(no-LLM · runtime)"]
+    KN --> INT["Leader: synthesize into business insight<br/>(LLM · runtime)"]
+    EN --> INT
     INT --> OUT["Grounded insight + narrative<br/>(output)"]
+    AN -.->|"keeps running same expensive query → Leader suggests"| SUG{"User approves a view?<br/>(no-LLM · runtime, user)"}
+    SUG -.->|Yes| EN
+    EN -.->|"view available next time"| RET
     classDef llm fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
     classDef det fill:#e2e8f0,stroke:#64748b,color:#1e293b;
     classDef mixed fill:#ede9fe,stroke:#8b5cf6,color:#4c1d95;
     classDef io fill:#ffffff,stroke:#94a3b8,color:#334155;
     class U,OUT io;
-    class LEAD,DEL,AN,EN,LM,INT llm;
-    class CTX,RUN,OK,KN det;
+    class LEAD,EN,AN,LM,INT llm;
+    class CTX,RUN,OK,KN,SUG det;
     class RET mixed;
 ```
 
-**Decomposition (Q1).** The Leader decomposes the request and delegates to Analyst (querying) or Engineer (asset-building).
+*Verified against the Leader's actual system prompt (`dash/instructions.py`). An explicit "create a view/table" request routes straight to the **Engineer** (solid); everything else **defaults to the Analyst**. The **proactive** path (dotted) is not a counter — the Leader's "Proactive Engineering" instruction tells it, in natural language, that when the Analyst keeps re-running the same expensive query it should **suggest a view to the user**, who approves it. So pattern-"detection" is LLM judgment, and view-building is **user-approved, not autonomous**. Once built, the view is recorded to knowledge and the Analyst prefers it next time — the compounding loop, which runs across requests. The solid error loop is the Analyst's own self-learning (introspect → fix → save Learning → retry); after two failures the Leader instead asks the Engineer to introspect.*
+
+**Decomposition (Q1).** The Leader routes each question to the Analyst by default, and *separately* triggers the Engineer to build a reusable asset when it detects a recurring pattern across queries (not a per-request either/or choice).
 
 **Ordering (Q2).** The Leader sequences; the standout is the **self-learning loop** — failed steps become permanent learnings, which is effectively *replanning memory* that compounds over time.
 
@@ -273,6 +279,8 @@ flowchart TD
     class DAGGEN mixed;
 ```
 
+*Two phases in one picture: everything up to the **DAG** is build-time authoring (Otto — optional and human-invoked); everything from the **Scheduler** onward is the deterministic runtime engine, which involves no LLM and no Otto unless a task type explicitly calls one. The `Fail → Scheduler` and HITL edges are Airflow's own retry/approval loops, not Otto replanning.*
+
 **Decomposition (Q1).** Not an autonomous NL decomposer at the engine level — *you* or an authoring agent (Otto) define tasks. Within a DAG, `@task.agent` can decompose its own sub-steps over tools, and Dynamic Task Mapping fans a request into parallel tasks.
 
 **Ordering (Q2).** **The DAG *is* the ordering** — explicit dependencies, retries, event triggers, parallelism. This is the deterministic ordering layer your emergent LLM plan should *compile down to*.
@@ -305,15 +313,16 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    U["Message from any surface: Telegram / Slack / CLI / Email<br/>(input)"] --> CORE["Agent core + persistent memory + skills<br/>(LLM · runtime)"]
-    CORE --> PLAN["Plan / reason, multi-model<br/>(LLM · runtime)"]
-    PLAN --> DEL{"Delegate?<br/>(LLM · runtime)"}
-    DEL -->|Yes| SUB["Spawn isolated subagents: own terminal + Python RPC<br/>(LLM · runtime)"]
-    DEL -->|No| TOOLS["Use tools: web, browser, vision, image gen, TTS<br/>(mixed · runtime)"]
-    SUB --> SBX["Execute in sandbox: local / Docker / SSH / Singularity / Modal<br/>(no-LLM · runtime)"]
-    TOOLS --> SBX
+    U["Message from any surface: Telegram / Slack / CLI / Email<br/>(input)"] --> CORE["Agent core: load persistent memory + skills<br/>(LLM · runtime)"]
+    CORE --> PLAN["Reason about next step (multi-model)<br/>(LLM · runtime)"]
+    PLAN --> ACT{"Next step?<br/>(LLM · runtime)"}
+    ACT -->|"Use a tool"| TOOLS["Tools: web, browser, vision, image gen, TTS<br/>(mixed · runtime)"]
+    ACT -->|"Delegate"| SUB["Spawn isolated subagents: own terminal + Python RPC<br/>(LLM · runtime)"]
+    ACT -->|"Done"| MEM["Update memory + auto-generate reusable skill<br/>(mixed · runtime)"]
+    TOOLS --> SBX["Execute in sandbox: local / Docker / SSH / Singularity / Modal / Daytona<br/>(no-LLM · runtime)"]
+    SUB --> SBX
     SBX --> RES["Collect results<br/>(no-LLM · runtime)"]
-    RES --> MEM["Update memory + auto-generate reusable skill<br/>(mixed · runtime)"]
+    RES -->|"agentic loop"| PLAN
     MEM --> OUT["Respond on the originating surface<br/>(output)"]
     SCHED["NL scheduled trigger<br/>(no-LLM · fixed)"] -.->|unattended| CORE
     classDef llm fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
@@ -321,10 +330,12 @@ flowchart TD
     classDef mixed fill:#ede9fe,stroke:#8b5cf6,color:#4c1d95;
     classDef io fill:#ffffff,stroke:#94a3b8,color:#334155;
     class U,OUT io;
-    class CORE,PLAN,DEL,SUB llm;
+    class CORE,PLAN,ACT,SUB llm;
     class SBX,RES,SCHED det;
     class TOOLS,MEM mixed;
 ```
+
+*The **agentic loop** (collect results → reason about the next step) runs until the agent decides "Done" — a single tool or subagent call is one pass, not the whole task. The memory update and skill generation happen once, on completion.*
 
 **Decomposition (Q1).** Subagent delegation — the parent decomposes work and spawns isolated children (supervisor-style), each with its own context/terminal/RPC.
 
@@ -374,6 +385,8 @@ flowchart TD
     class AGENT llm;
     class META,SEL,POL,SBX,CHK,SHARE det;
 ```
+
+*The wrapped agent runs its own internal reasoning loop (hidden inside one node); Omnigent's loop is the **policy-enforcement** cycle — it evaluates cost/permission against the agent's actions and blocks or allows, rather than doing any task reasoning itself.*
 
 **Decomposition (Q1) / Ordering (Q2).** Neither — it composes and governs sub-agents; the wrapped agents do any decomposition/ordering.
 
