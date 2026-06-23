@@ -15,6 +15,8 @@ These span all three tiers: Oracle/Julius/DeepAnalyze/Agno are **data agents (Ti
 
 So `(LLM · runtime)` = an LLM call whose path is chosen at runtime; `(no-LLM · fixed)` = a deterministic step that always runs at this position; `(LLM · fixed slot)` = an LLM call that always occupies this slot but whose output is generated; `(mixed · runtime)` = both. Colors are best-effort — some Markdown viewers ignore mermaid styling, so the **text tag in each node is the source of truth**.
 
+Each section has **two diagrams**: a detailed one, and a **compact, slide-friendly version** (left-to-right, granular steps merged into single blocks — e.g. tools/inputs/lifecycle stages collapsed) sized to drop into a PowerPoint slide. The compact tags keep only the LLM axis (LLM / no-LLM / mixed) for legibility.
+
 ---
 
 ## 1. Oracle Data Science Agent
@@ -54,6 +56,25 @@ flowchart TD
 ```
 
 *The clarification loop (ask the user a question → return to the query) is Oracle's **interactive** behavior; in fully **autonomous** mode the agent suppresses the loop and runs straight through ("perform all steps end-to-end and give me the result").*
+
+**Compact view (slide-friendly):**
+
+```mermaid
+flowchart LR
+    U(["User query"]) --> UND["Understand + clarify<br/>(LLM)"]
+    UND --> PLAN["Plan lifecycle<br/>(LLM)"]
+    PLAN --> EXEC["In-DB: profile → engineer → train → validate<br/>(no-LLM, classical ML)"]
+    EXEC --> EXP["Explain results<br/>(LLM)"]
+    EXP -->|refine| UND
+    EXP --> OUT(["Insights"])
+    classDef llm fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
+    classDef det fill:#e2e8f0,stroke:#64748b,color:#1e293b;
+    classDef mixed fill:#ede9fe,stroke:#8b5cf6,color:#4c1d95;
+    classDef io fill:#ffffff,stroke:#94a3b8,color:#334155;
+    class U,OUT io;
+    class UND,PLAN,EXP llm;
+    class EXEC det;
+```
 
 **Decomposition (Q1).** Lifecycle decomposition — the fixed DS skeleton (profile → features → train → evaluate → explain) is broken into steps; interactive mode externalizes the plan for the user to validate before proceeding.
 
@@ -112,6 +133,29 @@ flowchart TD
 
 *Two nested loops are collapsed into the cycle above: an **inner repair loop** (a runtime error sends the code back to "Generate" to be fixed and re-run) and an **outer agentic loop** ("need more" returns to "Choose next action" for the next step). The cycle runs many times — often several steps — before "Done"; it is not a single pass, and the three action types are choices made per pass, not one-time exits. Julius doesn't publish its exact control flow, so the loop structure is inferred from its documented auto-debug behavior and reviewer observations of multi-step runs.*
 
+**Compact view (slide-friendly):**
+
+```mermaid
+flowchart LR
+    U(["Prompt + data"]) --> PLAN["Plan / choose action<br/>(LLM)"]
+    PLAN --> GEN["Generate code<br/>(LLM)"]
+    GEN --> EXEC["Execute in sandbox<br/>(no-LLM)"]
+    EXEC --> CHK{"Done?"}
+    CHK -->|"error / more"| GEN
+    CHK -->|done| INT["Interpret + visualize<br/>(LLM)"]
+    INT --> SAVE{"Reuse?"}
+    SAVE -->|"save as Notebook / scheduled"| REUSE["Persist reusable workflow<br/>(no-LLM)"]
+    SAVE -->|one-off| OUT(["Answer"])
+    REUSE --> OUT
+    classDef llm fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
+    classDef det fill:#e2e8f0,stroke:#64748b,color:#1e293b;
+    classDef mixed fill:#ede9fe,stroke:#8b5cf6,color:#4c1d95;
+    classDef io fill:#ffffff,stroke:#94a3b8,color:#334155;
+    class U,OUT io;
+    class PLAN,GEN,INT llm;
+    class EXEC,CHK,SAVE,REUSE det;
+```
+
 **Decomposition (Q1).** User- or agent-defined step plans / notebook cells. More a *guided plan executor* than an autonomous decomposer — you (or a Custom Agent's instructions) provide the steps.
 
 **Ordering (Q2).** Plan/notebook order, or the agent follows a custom step plan.
@@ -163,6 +207,24 @@ flowchart TD
 ```
 
 *(Loop continues — up to ~30 rounds — until an `<Answer>` token is generated. A hard rule inserts `<Execute>` after every `<Code>`, so act→observe is trained in.)*
+
+**Compact view (slide-friendly):**
+
+```mermaid
+flowchart LR
+    U(["Instruction + data"]) --> LOOP["Model: analyze / understand / code<br/>(LLM)"]
+    LOOP --> EXEC["Execute code + observe<br/>(no-LLM)"]
+    EXEC --> LOOP
+    LOOP --> ANS["Answer / report<br/>(LLM)"]
+    ANS --> OUT(["Report"])
+    classDef llm fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
+    classDef det fill:#e2e8f0,stroke:#64748b,color:#1e293b;
+    classDef mixed fill:#ede9fe,stroke:#8b5cf6,color:#4c1d95;
+    classDef io fill:#ffffff,stroke:#94a3b8,color:#334155;
+    class U,OUT io;
+    class LOOP,ANS llm;
+    class EXEC det;
+```
 
 **Decomposition (Q1).** Internal to the model — `<Analyze>` lays out the plan; curriculum training teaches it to compose abilities. No external planner.
 
@@ -221,6 +283,30 @@ flowchart TD
 ```
 
 *Verified against the Leader's actual system prompt (`dash/instructions.py`). An explicit "create a view/table" request routes straight to the **Engineer** (solid); everything else **defaults to the Analyst**. The **proactive** path (dotted) is not a counter — the Leader's "Proactive Engineering" instruction tells it, in natural language, that when the Analyst keeps re-running the same expensive query it should **suggest a view to the user**, who approves it. So pattern-"detection" is LLM judgment, and view-building is **user-approved, not autonomous**. Once built, the view is recorded to knowledge and the Analyst prefers it next time — the compounding loop, which runs across requests. The solid error loop is the Analyst's own self-learning (introspect → fix → save Learning → retry); after two failures the Leader instead asks the Engineer to introspect.*
+
+**Compact view (slide-friendly):**
+
+```mermaid
+flowchart LR
+    U(["Question"]) --> LEAD["Leader routes<br/>(LLM)"]
+    LEAD -->|"data question (default)"| ANA["Retrieve context + Analyst SQL<br/>(mixed)"]
+    LEAD -->|"explicit: create a view"| ENG["Engineer builds dash view<br/>(LLM)"]
+    ANA --> RUN["Execute SQL<br/>(no-LLM)"]
+    RUN -->|"error: learn + retry"| ANA
+    RUN --> INT["Synthesize insight<br/>(LLM)"]
+    ENG --> INT
+    INT --> OUT(["Insight"])
+    ANA -.->|"repeated pattern, user-approved"| ENG
+    ENG -.->|"reused next time"| ANA
+    classDef llm fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
+    classDef det fill:#e2e8f0,stroke:#64748b,color:#1e293b;
+    classDef mixed fill:#ede9fe,stroke:#8b5cf6,color:#4c1d95;
+    classDef io fill:#ffffff,stroke:#94a3b8,color:#334155;
+    class U,OUT io;
+    class LEAD,INT,ENG llm;
+    class RUN det;
+    class ANA mixed;
+```
 
 **Decomposition (Q1).** The Leader routes each question to the Analyst by default, and *separately* triggers the Engineer to build a reusable asset when it detects a recurring pattern across queries (not a per-request either/or choice).
 
@@ -281,6 +367,24 @@ flowchart TD
 
 *Two phases in one picture: everything up to the **DAG** is build-time authoring (Otto — optional and human-invoked); everything from the **Scheduler** onward is the deterministic runtime engine, which involves no LLM and no Otto unless a task type explicitly calls one. The `Fail → Scheduler` and HITL edges are Airflow's own retry/approval loops, not Otto replanning.*
 
+**Compact view (slide-friendly):**
+
+```mermaid
+flowchart LR
+    NL(["NL request"]) --> AUTH["Author: Otto / human writes DAG<br/>(LLM, build-time)"]
+    AUTH --> DAG["DAG: tasks + dependencies<br/>(no-LLM)"]
+    DAG --> RUN["Scheduler runs tasks; retries + HITL<br/>(no-LLM)"]
+    RUN -.->|"@task.llm / @task.agent"| AI["LLM task<br/>(LLM)"]
+    RUN --> OUT(["Outputs + logs"])
+    classDef llm fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
+    classDef det fill:#e2e8f0,stroke:#64748b,color:#1e293b;
+    classDef mixed fill:#ede9fe,stroke:#8b5cf6,color:#4c1d95;
+    classDef io fill:#ffffff,stroke:#94a3b8,color:#334155;
+    class NL,OUT io;
+    class AUTH,AI llm;
+    class DAG,RUN det;
+```
+
 **Decomposition (Q1).** Not an autonomous NL decomposer at the engine level — *you* or an authoring agent (Otto) define tasks. Within a DAG, `@task.agent` can decompose its own sub-steps over tools, and Dynamic Task Mapping fans a request into parallel tasks.
 
 **Ordering (Q2).** **The DAG *is* the ordering** — explicit dependencies, retries, event triggers, parallelism. This is the deterministic ordering layer your emergent LLM plan should *compile down to*.
@@ -337,6 +441,26 @@ flowchart TD
 
 *The **agentic loop** (collect results → reason about the next step) runs until the agent decides "Done" — a single tool or subagent call is one pass, not the whole task. The memory update and skill generation happen once, on completion.*
 
+**Compact view (slide-friendly):**
+
+```mermaid
+flowchart LR
+    U(["Message"]) --> CORE["Reason + plan<br/>(LLM)"]
+    CORE --> ACT["Tools / subagents<br/>(mixed)"]
+    ACT --> SBX["Execute in sandbox<br/>(no-LLM)"]
+    SBX -->|loop| CORE
+    CORE -->|done| MEM["Update memory + respond<br/>(mixed)"]
+    MEM --> OUT(["Reply"])
+    classDef llm fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
+    classDef det fill:#e2e8f0,stroke:#64748b,color:#1e293b;
+    classDef mixed fill:#ede9fe,stroke:#8b5cf6,color:#4c1d95;
+    classDef io fill:#ffffff,stroke:#94a3b8,color:#334155;
+    class U,OUT io;
+    class CORE llm;
+    class SBX det;
+    class ACT,MEM mixed;
+```
+
 **Decomposition (Q1).** Subagent delegation — the parent decomposes work and spawns isolated children (supervisor-style), each with its own context/terminal/RPC.
 
 **Ordering (Q2).** LLM-driven within a session; NL scheduling sequences unattended runs. No deterministic/symbolic planner.
@@ -387,6 +511,25 @@ flowchart TD
 ```
 
 *The wrapped agent runs its own internal reasoning loop (hidden inside one node); Omnigent's loop is the **policy-enforcement** cycle — it evaluates cost/permission against the agent's actions and blocks or allows, rather than doing any task reasoning itself.*
+
+**Compact view (slide-friendly):**
+
+```mermaid
+flowchart LR
+    U(["Task"]) --> HARNESS["Select harness + policies<br/>(no-LLM)"]
+    HARNESS --> SBX["Omnibox sandbox<br/>(no-LLM)"]
+    SBX --> AGENT["Wrapped agent runs<br/>(LLM)"]
+    AGENT --> CHK{"Policy OK?"}
+    CHK -->|violation| HARNESS
+    CHK -->|ok| OUT(["Result"])
+    classDef llm fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
+    classDef det fill:#e2e8f0,stroke:#64748b,color:#1e293b;
+    classDef mixed fill:#ede9fe,stroke:#8b5cf6,color:#4c1d95;
+    classDef io fill:#ffffff,stroke:#94a3b8,color:#334155;
+    class U,OUT io;
+    class AGENT llm;
+    class HARNESS,SBX,CHK det;
+```
 
 **Decomposition (Q1) / Ordering (Q2).** Neither — it composes and governs sub-agents; the wrapped agents do any decomposition/ordering.
 
